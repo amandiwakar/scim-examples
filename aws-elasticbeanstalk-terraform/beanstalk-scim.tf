@@ -11,6 +11,8 @@ terraform {
       source  = "hashicorp/random"
       version = "3.0.0"
     }
+
+    
   }
 }
 
@@ -20,6 +22,16 @@ provider "aws" {
 }
 
 provider "random" {}
+
+
+# https://registry.terraform.io/providers/hashicorp/archive/latest/docs/data-sources/archive_file
+data "archive_file" "env" {
+  type        = "zip"
+  source_file = "${path.module}/docker-compose.yml"
+  output_path = "${path.module}/files/env.zip"
+}
+
+
 
 ## We generate a random s3-bucket suffix, this is to avoid collisions since AWS 
 ## s3 buckets are "global" to AWS, you can also use your own bucket name and
@@ -33,11 +45,11 @@ resource "aws_s3_bucket" "beanstalk_scim" {
   acl    = "private"
 }
 
-resource "aws_s3_bucket_object" "docker_compose" {
+resource "aws_s3_bucket_object" "env" {
   bucket = aws_s3_bucket.beanstalk_scim.bucket
-  key    = "scim-1.6/docker-compose.yml"
-  source = "docker-compose.yml"
-  etag   = filemd5("docker-compose.yml")
+  key    = "scim-1.6/env.zip"
+  source = "files/env.zip"
+  etag   = data.archive_file.env.output_md5
 }
 
 resource "aws_elastic_beanstalk_application" "onepassword_scimbridge" {
@@ -45,12 +57,12 @@ resource "aws_elastic_beanstalk_application" "onepassword_scimbridge" {
   description = "1Password SCIM bridge"
 }
 
-resource "aws_elastic_beanstalk_application_version" "scim_latest" {
-  name        = "latest"
+resource "aws_elastic_beanstalk_application_version" "v1_6" {
+  name        = "scim_1_6"
   application = aws_elastic_beanstalk_application.onepassword_scimbridge.name
-  description = "Version latest of app ${aws_elastic_beanstalk_application.onepassword_scimbridge.name}"
+  description = "Version 1.6 of app ${aws_elastic_beanstalk_application.onepassword_scimbridge.name}"
   bucket      = aws_s3_bucket.beanstalk_scim.bucket
-  key         = aws_s3_bucket_object.docker_compose.key
+  key         = aws_s3_bucket_object.env.key
 }
 
 # Beanstalk instance profile
@@ -84,7 +96,7 @@ resource "aws_elastic_beanstalk_environment" "onepassword_scimbridge" {
   # aws elasticbeanstalk list-available-solution-stacks
   solution_stack_name = "64bit Amazon Linux 2 v3.2.0 running Docker"
   # solution_stack_name = "64bit Amazon Linux 2018.03 v2.22.1 running Multi-container Docker 19.03.6-ce (Generic)"
-  version_label = aws_elastic_beanstalk_application_version.scim_latest.name
+  version_label = aws_elastic_beanstalk_application_version.v1_6.name
 
   # There are a LOT of settings, see here for the basic list:
   # https://docs.aws.amazon.com/elasticbeanstalk/latest/dg/command-options-general.html
@@ -108,7 +120,7 @@ resource "aws_elastic_beanstalk_environment" "onepassword_scimbridge" {
   }
 
   setting {
-    namespace = "aws:elasticbeanstalk:environment:process:HTTPS"
+    namespace = "aws:elasticbeanstalk:environment:process:https"
     name      = "Port"
     value     = "443"
   }
@@ -122,7 +134,7 @@ resource "aws_elastic_beanstalk_environment" "onepassword_scimbridge" {
   setting {
     namespace = "aws:elbv2:listener:443"
     name      = "DefaultProcess"
-    value     = "HTTPS"
+    value     = "https"
   }
 
   setting {
