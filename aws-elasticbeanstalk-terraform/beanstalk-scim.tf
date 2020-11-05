@@ -9,10 +9,8 @@ terraform {
 
     random = {
       source  = "hashicorp/random"
-      version = "3.0.0"
+      version = "~> 3.0"
     }
-
-    
   }
 }
 
@@ -21,17 +19,44 @@ provider "aws" {
   region = "us-east-1"
 }
 
-provider "random" {}
-
-
 # https://registry.terraform.io/providers/hashicorp/archive/latest/docs/data-sources/archive_file
 data "archive_file" "env" {
   type        = "zip"
-  source_file = "${path.module}/docker-compose.yml"
-  output_path = "${path.module}/files/env.zip"
+  output_path = "${path.module}/file_to_upload/env.zip"
+
+  source {
+    content  = file("${path.module}/docker-compose.yml")
+    filename = "docker-compose.yml"
+  }
+
+  source {
+    content  = file("${path.module}/scimsession")
+    filename = "scimsession"
+  }
 }
 
+## We generate a ssh key to be able to connect directly to the machine
+## and debug it! you can also use your already existing ssh keys for this.
+resource "tls_private_key" "ssh_key" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
 
+resource "aws_key_pair" "ssh_key" {
+  key_name   = "1password-scimbridge-key"
+  public_key = tls_private_key.ssh_key.public_key_openssh
+}
+
+resource "local_file" "public_key" {
+    content     = tls_private_key.ssh_key.public_key_openssh
+    filename = "${path.module}/keys/id_rsa.pub"
+}
+
+resource "local_file" "private_key" {
+    sensitive_content     = tls_private_key.ssh_key.private_key_pem
+    file_permission = "0400"
+    filename = "${path.module}/keys/id_rsa.pem"
+}
 
 ## We generate a random s3-bucket suffix, this is to avoid collisions since AWS 
 ## s3 buckets are "global" to AWS, you can also use your own bucket name and
@@ -48,13 +73,21 @@ resource "aws_s3_bucket" "beanstalk_scim" {
 resource "aws_s3_bucket_object" "env" {
   bucket = aws_s3_bucket.beanstalk_scim.bucket
   key    = "scim-1.6/env.zip"
-  source = "files/env.zip"
+  source = data.archive_file.env.output_path
   etag   = data.archive_file.env.output_md5
 }
 
 resource "aws_elastic_beanstalk_application" "onepassword_scimbridge" {
   name        = "1password-scimbridge"
   description = "1Password SCIM bridge"
+}
+
+resource "aws_elastic_beanstalk_application_version" "v1_6_test" {
+  name        = "scim_1_6_test4"
+  application = aws_elastic_beanstalk_application.onepassword_scimbridge.name
+  description = "Version 1.6_test of app ${aws_elastic_beanstalk_application.onepassword_scimbridge.name}"
+  bucket      = aws_s3_bucket.beanstalk_scim.bucket
+  key         = aws_s3_bucket_object.env.key
 }
 
 resource "aws_elastic_beanstalk_application_version" "v1_6" {
@@ -90,13 +123,13 @@ resource "aws_iam_instance_profile" "in_beanstalk_ec2" {
 resource "aws_elastic_beanstalk_environment" "onepassword_scimbridge" {
   name         = "1password-scimbridge-test"
   application  = aws_elastic_beanstalk_application.onepassword_scimbridge.name
-  cname_prefix = "1password-scimbridge"
+  cname_prefix = "1password-scimbridge-test"
 
   # To get the list of available solutions stack, aws-cli
   # aws elasticbeanstalk list-available-solution-stacks
   solution_stack_name = "64bit Amazon Linux 2 v3.2.0 running Docker"
   # solution_stack_name = "64bit Amazon Linux 2018.03 v2.22.1 running Multi-container Docker 19.03.6-ce (Generic)"
-  version_label = aws_elastic_beanstalk_application_version.v1_6.name
+  version_label = aws_elastic_beanstalk_application_version.v1_6_test.name
 
   # There are a LOT of settings, see here for the basic list:
   # https://docs.aws.amazon.com/elasticbeanstalk/latest/dg/command-options-general.html
@@ -140,13 +173,14 @@ resource "aws_elastic_beanstalk_environment" "onepassword_scimbridge" {
   setting {
     namespace = "aws:elasticbeanstalk:application:environment"
     name      = "OP_LETSENCRYPT_DOMAIN"
-    value     = "1password-scimbridge.us-east-1.elasticbeanstalk.com"
+    value     = "1password-scimbridge-test.us-east-1.elasticbeanstalk.com"
     // Self referencial failure
     //    value = aws_elastic_beanstalk_environment.onepassword_scimbridge.cname
   }
+
   setting {
     namespace = "aws:autoscaling:launchconfiguration"
     name      = "EC2KeyName"
-    value     = "p-a"
+    value     = aws_key_pair.ssh_key.key_name
   }
 }
